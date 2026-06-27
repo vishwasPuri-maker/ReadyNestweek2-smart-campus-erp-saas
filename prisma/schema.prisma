@@ -1,0 +1,180 @@
+// Smart Campus — Multi-Tenant SaaS schema.
+// Prisma 7: client generates into ../src/generated/prisma (import via @/generated/prisma/client).
+// Connection URLs live in prisma.config.ts (migrations) and the PrismaClient driver
+// adapter at runtime — see src/lib/prisma.ts. They are NOT set in this schema file.
+//
+// TENANT ISOLATION RULE: every tenant model carries organizationId + an index that
+// starts with organizationId. Any new model MUST follow this.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  ADMIN
+  TEACHER
+  STUDENT
+}
+
+model Organization {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique // "abc-college" — URL/subdomain
+  logoUrl   String?
+  verified  Boolean  @default(false) // true after admin email verification
+  createdAt DateTime @default(now())
+
+  // Shareable self-serve join codes (nullable: lazily generated on first use).
+  // The code is the trust boundary — long & unguessable; admin can regenerate.
+  // Each code can expire (expiresAt) and/or cap how many people use it (maxUses).
+  teacherCode          String?   @unique
+  teacherCodeExpiresAt DateTime?
+  teacherCodeMaxUses   Int?
+  teacherCodeUses      Int       @default(0)
+  studentCode          String?   @unique
+  studentCodeExpiresAt DateTime?
+  studentCodeMaxUses   Int?
+  studentCodeUses      Int       @default(0)
+
+  users      User[]
+  notices    Notice[]
+  timetable  TimetableEntry[]
+  attendance Attendance[]
+  tasks      Task[]
+  notes      Note[]
+  files      FileBlob[]
+}
+
+model User {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  email          String       @unique // global unique = simple login
+  passwordHash   String
+  name           String
+  role           Role         @default(STUDENT)
+  emailVerified  DateTime?
+  isActive       Boolean      @default(true)
+  // Class membership: teachers & students self-select; linked when both match.
+  branch         String?
+  section        String?
+  createdAt      DateTime     @default(now())
+
+  notices Notice[] @relation("NoticeAuthor")
+  notes   Note[]
+
+  @@index([organizationId])
+  @@index([organizationId, role])
+  @@index([organizationId, role, branch, section])
+}
+
+// Email verification + password reset tokens. Not a tenant table (used pre-login).
+model VerificationToken {
+  id         String   @id @default(cuid())
+  identifier String // email
+  token      String   @unique
+  expires    DateTime
+
+  @@index([identifier])
+}
+
+model Notice {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  authorId       String
+  author         User         @relation("NoticeAuthor", fields: [authorId], references: [id])
+  title          String
+  body           String
+  // null branch/section = whole-org notice (admin). Set = scoped to that class.
+  branch         String?
+  section        String?
+  attachment     Json? // { id, name, type, size } → FileBlob
+  createdAt      DateTime     @default(now())
+
+  @@index([organizationId, createdAt])
+  @@index([organizationId, branch, section])
+}
+
+model TimetableEntry {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  dayOfWeek      Int // 0=Sun ... 6=Sat
+  startTime      String // "09:00"
+  endTime        String
+  subject        String
+  room           String?
+  teacherId      String?
+  branch         String?
+  section        String?
+
+  @@index([organizationId, dayOfWeek])
+  @@index([organizationId, branch, section])
+}
+
+model Attendance {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  studentId      String
+  markedById     String // teacher
+  date           DateTime
+  present        Boolean
+  subject        String?
+
+  @@unique([organizationId, studentId, date, subject])
+  @@index([organizationId, studentId])
+}
+
+model Task {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  title          String
+  description    String?
+  dueDate        DateTime?
+  assignedById   String? // teacher (null = student's personal task)
+  ownerId        String // who owns / completes it
+  completed      Boolean      @default(false)
+  attachment     Json? // { id, name, type, size } → FileBlob
+  createdAt      DateTime     @default(now())
+
+  @@index([organizationId, ownerId])
+}
+
+model Note {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  ownerId        String
+  owner          User         @relation(fields: [ownerId], references: [id])
+  title          String
+  content        String       @default("")
+  attachment     Json? // { id, name, type, size } → FileBlob
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@index([organizationId, ownerId])
+}
+
+// File storage in Postgres (10MB cap). Served via /api/files/[id]. Kept isolated
+// so a CDN/object store (Cloudinary, Blob) can replace it without touching callers.
+model FileBlob {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name           String
+  mimeType       String
+  size           Int
+  data           Bytes
+  createdById    String
+  createdAt      DateTime     @default(now())
+
+  @@index([organizationId])
+}
